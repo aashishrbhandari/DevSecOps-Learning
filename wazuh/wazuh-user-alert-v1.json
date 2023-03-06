@@ -90,7 +90,7 @@
         }
     },
     "decoder": {
-        "name": "syscheck_new_entry"
+       "name": "syscheck_new_entry"
     },
     "location": "syscheck"
 }

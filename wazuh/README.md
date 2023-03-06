@@ -13,3 +13,5 @@ I have created a script: `custom-email-alerts-v2`, it is an upgrade to the scrip
 python3 custom-email-alerts-v2 wazuh-user-alert-v1.json debug ashish.bhandari@lrn.com debug
 ```
 
+## Add to WaZuh Integrations
+... To be added shortly
