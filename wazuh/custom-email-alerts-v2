@@ -1,0 +1,668 @@
+#!/var/ossec/framework/python/bin/python3
+
+######################### custom-email-alerts #############################
+# Customization Author: Ashish R Bhandari
+# Author: Juan C. Tello
+# Version: 2023.02.18
+#
+# 
+#
+# Configuration example:
+# ----------------------
+#
+#  <integration>
+#      <name>custom-email-alerts-v2</name>
+#      <hook_url>emailrecipient@example.com,email2@dummy.com</hook_url>
+#      <group>syscheck</group>
+#      <alert_format>json</alert_format>
+#  </integration>
+#
+#
+#
+##########################################################################
+
+import json
+import sys
+import time
+import os
+import smtplib
+from email.message import EmailMessage
+
+email_server = "127.0.0.1"
+email_from = "sender@example-domain.com"
+
+""" Used as Footer in HTML Email Alerts """
+from_name = "SecOps Team"
+from_email = "secops@example-domain.com"
+
+""" Additional global vars """
+debug_enabled = False
+pwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+json_alert = {}
+now = time.strftime("%a %b %d %H:%M:%S %Z %Y")
+
+""" Set paths """
+log_file = '{0}/logs/integrations.log'.format(pwd)
+
+""" Alert Enhacement UI
+- Hex Code can also be used
+"""
+alert_color = "red"
+
+"""
+This Function processes the `syscheck` > `path` field and extracts in 'dict' form
+- path - file with full path
+"""
+def get_dir_and_file(path):
+    _dir = os.path.dirname(path)
+    core_dir = ""
+    _dir2check = _dir.split("/")
+    if len(_dir2check) > 2:
+        _sub_dir = _dir2check[:3] 
+        core_dir = "/".join(_sub_dir)
+    else:
+        core_dir = "/".join(_dir2check)
+    _file = os.path.basename(path)
+    return { "dir": _dir, "file": _file, "core_dir": core_dir, "path": path }
+
+"""
+This Function helps in creating a Custom Email Subject for WAZUH FIM(syscheck)
+
+Example:
+---------
+Wazuh Alerts | Type: FIM | Event: Modified | DIR: /opt/suv1 | File: easd.tmp | Node: RDASAPA01/10.112.12.2 | Login: karan(by root)
+Wazuh Alerts | Type: FIM | Event: Added | DIR: /opt/suv1 | File: easd.tmp | Node: RDASAPA01/10.112.12.2 | Login: karan(by root)
+Wazuh Alerts | Type: FIM | Event: Deleted | DIR: /opt/suv1 | File: easd.tmp | Node: RDASAPA01/10.112.12.2 | Login : karan(by root)
+
+Multiple Ways to Add Subject
+
+-- Code --
+subject = f'Wazuh Alerts | {_type}, {_event}, inside Core Directory({_dir}), File({_file}) in Node {_agent_name}/{_agent_ip} change made by {_logged_in_user} using {_audit_user} Privilege'
+-- Output --
+Wazuh Alerts | FIM, Added, inside Core Directory(/usr/local), File(2023_02_19-10_40_01.1676783401) in Node ubu-fortest/192.168.120.151 change made by root using root Privilege
+
+-- Code --
+subject = f'Wazuh Alert: {_type}, {_event}, Core Directory[{_dir}], File[{_file}], Node[{_agent_name}/{_agent_ip}], Login[{_logged_in_user}], Privilege[{_audit_user}]'
+
+-- Output --
+Wazuh Alert: FIM, Added, Core Directory[/usr/local], File[2023_02_19-10_40_01.1676783401], Node[ubu-fortest/192.168.120.151], Login[abhandari], Privilege[root]'
+
+"""
+def build_subject(alert_json):
+    _type = "Unknown"
+    _event = "Unknown"
+    _dir = "Unknown"
+    _file = "Unknown"
+    _path = "Unkown"
+    _audit = False
+    _agent_name = "Unknown"
+    _agent_ip = "Unknown"
+    _logged_in_user = "Unknown"
+    _audit_user = "Unknown"
+    
+    if "agent" in alert_json:
+        _agent_name = alert_json["agent"]["name"]
+        _agent_ip = alert_json["agent"]["ip"]
+
+    if "syscheck" in alert_json:
+        _type = "FIM"
+
+        if "path" in alert_json["syscheck"]:
+            _path_json = get_dir_and_file(alert_json["syscheck"]["path"])
+            _dir = _path_json["core_dir"]
+            _file = _path_json["file"]
+            _path = _path_json['path']
+
+        if "event" in alert_json["syscheck"]:
+            _event = alert_json["syscheck"]["event"].capitalize()
+        
+        if "audit" in alert_json["syscheck"]:
+            _audit = True
+            _logged_in_user = alert_json["syscheck"]["audit"]["login_user"]["name"]
+            _audit_user = alert_json["syscheck"]["audit"]["user"]["name"]
+    else:
+        _type = ",".join(alert_json["groups"])
+    
+    
+    summary_preview = "User {_event} file [{_path}]".format(_event=_event, _path=_path)
+
+    if _audit:
+        subject = 'Wazuh Alert: {_type}, {_event}, {_agent_name}, {_agent_ip}'.format(_type=_type, _event=_event, _agent_name=_agent_name, _agent_ip=_agent_ip)
+        _path = _path_json['path']
+        if _logged_in_user == _audit_user:
+            summary_preview = "User `{_logged_in_user}` {_event} file [{_path}]".format(_type=_type, _event=_event, _dir=_dir, _file=_file, _agent_name=_agent_name, _agent_ip=_agent_ip, _logged_in_user=_logged_in_user, _audit_user=_audit_user, _path=_path)
+        else:
+            summary_preview = "User `{_logged_in_user}` using `{_audit_user}` Privilege {_event} file [{_path}]".format(_event=_event, logged_in_user=_logged_in_user, _audit_user=_audit_user, _path=_path)
+    else:
+        subject = 'Wazuh Alert: {_type}, {_event}, {_agent_name}, {_agent_ip}'.format(_type=_type, _event=_event, _agent_name=_agent_name, _agent_ip=_agent_ip)
+    
+    return { "subject": subject, "summary_preview": summary_preview }
+
+"""
+Build HTML Event Summary... Mostly for FIM - in this version
+"""
+def build_html_event_summary(alert_json):
+
+    _type = "Unknown"
+    file = "Unknown"
+    agent_name = "Unknown"
+    agent_id = "Unknown"
+    agent_ip = "Unknown"
+    event_time = "Unknown"
+    event_type = "Unknown"
+    event_rule_id = "Unknown"
+    event_rule_level = "Unknown"
+    fim_mode = "Unknown"
+    summary_fields = []
+
+    if "syscheck" in alert_json:
+        _type = "FIM"
+
+        if "path" in alert_json["syscheck"]:
+            file = alert_json["syscheck"]["path"]
+            summary_fields.append(
+                """
+                <tr>
+                    <td style="font-weight:bold;padding-bottom: 8px;"> File Detected </td>
+                    <td style="padding-bottom: 8px;"> {file} </td>
+                </tr>         
+                """.format(file=file)
+            )
+
+    if "agent" in alert_json:
+        agent_name = alert_json["agent"]["name"]
+        agent_id = alert_json["agent"]["id"]
+        agent_ip = alert_json["agent"]["ip"]
+        summary_fields.append(
+            """
+            <tr>
+                <td style="font-weight:bold;padding-bottom: 8px;"> Agent/Node name </td>
+                <td style="padding-bottom: 8px;"> {agent_name} (id={agent_id}) / {agent_ip} </td>
+            </tr>          
+            """.format(agent_name=agent_name, agent_id=agent_id, agent_ip=agent_ip)
+        )
+
+    if "timestamp" in alert_json:
+        event_time = time.ctime() # Use Time of Wazuh Manager
+        summary_fields.append(
+            """
+            <tr>
+                <td style="font-weight:bold;padding-bottom: 8px;"> Event Time </td>
+                <td style="padding-bottom: 8px;"> {event_time} </td>
+            </tr>          
+            """.format(event_time=event_time)
+        )
+
+    if _type == "FIM":
+
+        if "event" in alert_json["syscheck"]:
+            
+            try: event_type = alert_json["syscheck"]["event"]
+            except: 
+                if "full_log" in alert_json:
+                    full_log = alert_json["full_log"]
+                    event_type = full_log.split("\n")[0].split(" ")[-1:]
+            event_rule_id = alert_json["rule"]["id"]
+            event_rule_level = alert_json["rule"]["level"]
+            summary_fields.append(
+                """
+                <tr>
+                    <td style="font-weight:bold;padding-bottom: 8px;"> Event Type </td>
+                    <td style="padding-bottom: 8px;"> {event_type} / id ({event_rule_id}) / level ({event_rule_level}) </td>
+                </tr>   
+                """.format(event_type=event_type, event_rule_id=event_rule_id, event_rule_level=event_rule_level)
+            )
+
+        if "mode" in alert_json["syscheck"]:
+            fim_mode = alert_json["syscheck"]["mode"]
+        else:
+            if "full_log" in alert_json:
+                full_log = alert_json["full_log"]
+                fim_mode = [(one_log.split(": ")[1]) for one_log in full_log.split("\n") if "mode:" in one_log.lower() ][0]
+        
+        summary_fields.append(
+            """
+            <tr>
+                <td style="font-weight:bold;padding-bottom: 8px;"> Detection Mode </td>
+                <td style="padding-bottom: 8px;"> {fim_mode} </td>
+            </tr> 
+            """.format(fim_mode=fim_mode)
+        )
+
+        if "mitre" in alert_json["rule"]:
+            _mitre_id = ', '.join(alert_json["rule"]["mitre"]["id"])
+            _mitre_tactic = ', '.join(alert_json["rule"]["mitre"]["tactic"])
+            _mitre_technique = ', '.join(alert_json["rule"]["mitre"]["technique"])
+
+            summary_fields.append(
+                """
+                <tr>
+                    <td style="font-weight:bold;padding-bottom: 8px;"> MITRE ATT&CK® <a href="https://attack.mitre.org/">↗</a> </td>
+                    <td></td>
+                </tr>
+                """
+            )
+            summary_fields.append(
+                """
+                <tr>
+                    <td style="font-weight:bold;padding-bottom: 8px;"> ID </td>
+                    <td style="padding-bottom: 8px;">
+                        {_mitre_id}
+                    </td>
+                </tr>
+                <tr>
+                    <td style="font-weight:bold;padding-bottom: 8px;"> TACTIC </td>
+                    <td style="padding-bottom: 8px;">
+                        {_mitre_tactic}
+                    </td>
+                </tr>
+                <tr>
+                    <td style="font-weight:bold;padding-bottom: 8px;"> TECHNIQUE </td>
+                    <td style="padding-bottom: 8px;">
+                        {_mitre_technique}
+                    </td>
+                </tr>
+                """.format(_mitre_id=_mitre_id, _mitre_tactic=_mitre_tactic, _mitre_technique=_mitre_technique)
+            )
+    else:
+        _type = ",".join(alert_json["groups"])
+        summary_fields.append(
+            """
+            <tr>
+                <td style="font-weight:bold;padding-bottom: 8px;"> Groups </td>
+                <td style="padding-bottom: 8px;"> {_type} </td>
+            </tr> 
+            """.format(_type=_type)
+        )
+
+    summary_fields = "".join(summary_fields)
+    event_summary_table = '''
+    <!-- Event Summary Template -->
+    <table width="100%" border="0" cellspacing="0" cellpadding="0">
+        <tbody>
+            {summary_fields}
+        </tbody>
+    </table>
+    '''.format(summary_fields=summary_fields)
+    return event_summary_table
+
+"""
+Show Audit Details in EMAIL HTML Table
+----------------------------------------
+"audit": {
+  "user":{"id":"0","name":"root"},
+  "process": {"id":"2429","name":"/bin/bash","cwd":"/root","parent_name":"/usr/sbin/sshd","parent_cwd":"/","ppid":"2291"},
+  "group": {"id":"0","name":"root"},
+  "login_user": {"id":"0","name":"root"},
+  "effective_user": {"id":"0","name":"root"}
+}
+"""
+def build_html_fim_whodata(alert_json):
+
+    audit = alert_json["syscheck"]["audit"]
+
+    login_user_name = audit["login_user"]["name"]
+    login_user_id = audit["login_user"]["id"]
+    user_name = audit["user"]["name"]
+    user_id = audit["user"]["id"]
+    group_name = audit["group"]["name"]
+    group_id = audit["group"]["id"]
+    effective_user_name = audit["effective_user"]["name"]
+    effective_user_id = audit["effective_user"]["id"]
+
+    p_id = audit["process"]["id"]
+    p_name = audit["process"]["name"]
+    try: p_cwd = audit["process"]["cwd"]
+    except: p_cwd = "N/A"
+    try: p_parent_name = audit["process"]["parent_name"]
+    except: p_parent_name = "N/A"
+    try: p_parent_cwd = audit["process"]["parent_cwd"]
+    except: p_parent_cwd = "N/A"
+    try: p_ppid = audit["process"]["ppid"]
+    except: p_ppid = "N/A"
+
+    return """
+        <tr>
+            <td id="onlyforpadding_left">&nbsp;</td>
+            <td id="head_name" style="font-size:24px;padding: 0px 10px 0px 0px;">
+            <b>WHO data(auditd)</b>
+            </td>
+            <td id="onlyforpadding_right">&nbsp;</td>
+        </tr>
+        <tr>
+            <td id="onlyforpadding_left">&nbsp;</td>
+            <td class="body_details" style="border: solid 1px #ddd; padding:10px 10px 10px 10px;">
+            <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                <tbody>
+                    <tr>
+                        <td style="width:50%;padding:0px 0px;vertical-align:top">
+                            <p style="margin:0 0 10px 0;">
+                                <span style="font-weight:bold">Loggedin User</span> <br>
+                                {login_user_name} (id={login_user_id})
+                            </p>
+                            <p style="margin:0 0 10px 0;">
+                                <span style="font-weight:bold">User Who Modified</span> <br>
+                                {user_name} (id={user_id})
+                            </p>
+                            <p style="margin:0 0 10px 0;">
+                                <span style="font-weight:bold">Group</span> <br>
+                                {group_name} (id={group_id})
+                            </p>
+                            <p style="margin:0 0 10px 0;">
+                                <span style="font-weight:bold">Effective User</span> <br>
+                                {effective_user_name} (id={effective_user_id})
+                            </p>
+                        </td>
+                        <td style="width:50%;padding:0px;vertical-align:top">
+                            <p style="margin:0 0 10px 0">
+                                <span style="font-weight:bold">Process</span> <br>
+                                id ({p_id}) <br />
+                                name ({p_name}) <br />
+                                cwd ({p_cwd}) <br />
+                                parent_name ({p_parent_name}) <br />
+                                parent_cwd ({p_parent_cwd}) <br />
+                                ppid ({p_ppid}) <br />
+                            </p>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            </td>
+            <td id="onlyforpadding_right">&nbsp;</td>
+        </tr>    
+    """.format(login_user_name=login_user_name, login_user_id=login_user_id, user_name=user_name, user_id=user_id, group_name=group_name, group_id=group_id, effective_user_name=effective_user_name, effective_user_id=effective_user_id, p_id=p_id, p_name=p_name, p_cwd=p_cwd, p_parent_name=p_parent_name, p_parent_cwd=p_parent_cwd, p_ppid=p_ppid)
+
+""" 
+Build HTML Snippet where WHODATA does not exists in Wazuh Alert JSON
+"""
+def build_html_fim_no_whodata():
+    return """
+        <tr>
+            <td id="onlyforpadding_left">&nbsp;</td>
+            <td id="head_name" style="font-size:24px;padding: 0px 10px 0px 0px;">
+            <b>WHO data(auditd)</b>
+            </td>
+            <td id="onlyforpadding_right">&nbsp;</td>
+        </tr>
+        <tr>
+            <td id="onlyforpadding_left">&nbsp;</td>
+            <td class="body_details" style="border: solid 1px #ddd; padding:10px 10px 10px 10px;">
+            <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                <tbody>
+                    <tr>
+                        <td style="padding:0px 0px; vertical-align:top; padding: 6px; background-color: #f8d7da; border-left: 4px solid rgb(170, 74, 68)">
+                            <p>
+                              &nbsp; &nbsp; <span style="font-size: 40px; padding-right: 10px;color: #721c24;">&#9888;</span> 
+                              <span style="vertical-align:super; font-size: 16px; font-weight: bold; color: #721c24;">No Whodata details was provided by Wazuh Agent</span>
+                            </p> 
+                            <p> Check below to Identify Root Cause </p>
+                            <span>&#8611;</span> If whodata attribute is enabled for this File Path in <directory>. <br> 
+                            <span>&#8611;</span> If `auditd` is installed in this Agent and is it running <br>
+                            <span>&#8611;</span> Check for audit config to validate it was properly added wazuh <br>
+                            <span>&#8611;</span> It is a process based change or it is a `Scheduled` Event Mode <br> <br>
+                          
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            </td>
+            <td id="onlyforpadding_right">&nbsp;</td>
+        </tr>
+    """
+
+""" 
+Convert JSON to Flatten JSON (Level 1)
+"""
+def flat_it(json_obj):
+    new_dict = {}
+    for f,v in json_obj.items():
+        if type(v) is dict:
+            for f1,v1 in v.items():
+                new_dict[f + "-" + f1] = v1
+        else:
+            new_dict[f] = v
+    return new_dict
+
+def build_html_detailed_analysis(alert_json):
+    
+    detailed_analysis = []
+    details_json = alert_json.copy()
+
+    details_json = flat_it(details_json)
+    
+    for field, description in details_json.items():
+        if field not in ["audit"]:
+            name = field.replace("_"," ").replace("-"," - ").title();
+            if type(description) is str:
+                description = "<br>".join(str(description).split("\n"))
+            elif type(description) is list:
+                description = ", ".join(str(x) for x in description)
+            elif type(description) is dict:
+                description = json.dumps(description, indent=4, sort_keys=True).replace(' ', '&nbsp;').replace('\n', '<br>')
+                description = '<code> {description} </code>'.format(description=description)
+
+            detailed_analysis.append(
+                """
+                <tr>
+                    <td style="padding:10px 10px 10px 10px;border:solid 1px #ddd">
+                    <span style="font-size:16px;font-weight:bold;">{name}</span> <br>
+                    {description}
+                    </td>
+                </tr>                
+                """.format(name=name, description=description)
+            )
+    
+    detailed_analysis = " ".join(detailed_analysis)
+    return """
+    <tbody>
+        {detailed_analysis}
+    </tbody>    
+    """.format(detailed_analysis=detailed_analysis)
+
+def build_html_email(alert_json, summary_preview, whodata, detailed_analysis):
+
+    event_summary = build_html_event_summary(alert_json)
+    return """
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+    <html>
+
+    <head>
+
+    <!--[if mso]>
+    <style type="text/css">
+        #onlyforpadding_left {{
+        padding: 0px 0px 0px 10px !important;
+        }}
+        #onlyforpadding_right {{
+        padding: 0px 10px 0px 0px !important;
+        }}
+        #head_name {{
+        padding: 10px 0px 10px 0px !important;
+        }}
+    </style>
+    <![endif]-->
+
+    </head>
+
+    <body style="background-color:#e2e1e0;font-family: Open Sans, sans-serif;font-size:100%;font-weight:400;line-height:1.4;color:#000;">
+    <div style="display:none!important;mso-hide:all;">{summary_preview}</div>
+    <table class="emailTable" id="emailIdTable" align="center" style="
+                    background-color:#fff;
+                    border-spacing: 10px;
+                    -webkit-border-radius:3px;
+                    -moz-border-radius:3px;
+                    border-radius:3px;
+                    -webkit-box-shadow:0 1px 3px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.24);
+                    -moz-box-shadow:0 1px 3px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.24);
+                    box-shadow:0 1px 3px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.24); 
+                    border-top: solid 10px {alert_color};
+                    width:100%;
+                    max-width: 900px;
+        ">
+
+        <tbody>
+        <tr>
+            <td id="onlyforpadding_left">&nbsp;</td>
+            <td id="head_name" style="font-size:24px;padding:0px 0px 0px 0px;">
+            <b>Event Summary</b>
+            </td>
+            <td id="onlyforpadding_right">&nbsp;</td>
+        </tr>
+        <tr>
+            <td id="onlyforpadding_left">&nbsp;</td>
+            <td class="body_details" width="100%" style="border: solid 1px #ddd; padding:10px 10px 10px 10px;">
+                {event_summary}
+            </td>
+            <td id="onlyforpadding_right">&nbsp;</td>
+        </tr>
+        {whodata}
+        <tr>
+            <td id="onlyforpadding_left">&nbsp;</td>
+            <td id="head_name" style="font-size:24px;padding: 0px 0px 0px 0px;">
+            <b>Detailed Analysis</b>
+            </td>
+            <td id="onlyforpadding_right">&nbsp;</td>
+        </tr>
+        <tr>
+            <td id="onlyforpadding_left">&nbsp;</td>
+            <td class="body_details" style="margin: 0; padding: 0">
+                <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                    {detailed_analysis}
+                </table>
+            </td>
+            <td id="onlyforpadding_right">&nbsp;</td>
+        </tr>
+        </tbody>
+        <tfooter>
+        <tr>
+            <td id="onlyforpadding_left">&nbsp;</td>
+            <td style="font-size:14px;padding:20px 0px 10px 0px;">
+                <b style="display:block;margin:0 0 10px 0;">Regards</b>
+                <b>From:</b> {from_name} <br>
+                <b>Email:</b> {from_email}
+            </td>
+            <td id="onlyforpadding_right">&nbsp;</td>
+        </tr>
+        </tfooter>
+    </table>
+    </body>
+
+    </html>
+    """.format(summary_preview=summary_preview, whodata=whodata, event_summary=event_summary, detailed_analysis=detailed_analysis, from_name=from_name, from_email=from_email, alert_color=alert_color)
+
+"""
+Function that will provide the custom subject and body for the email.
+It takes as input a dictionary object generated from the json alert
+"""
+def generate_msg(alert):
+    
+    subject_json = build_subject(alert_json=alert)
+    detailed_analysis = build_html_detailed_analysis(alert_json=alert)
+
+    if "audit" in alert["syscheck"]:
+        whodata = build_html_fim_whodata(alert_json=alert)
+        message = build_html_email(alert_json=alert, summary_preview=subject_json["summary_preview"], whodata=whodata, detailed_analysis=detailed_analysis)
+    else:
+        no_whodata = build_html_fim_no_whodata(alert_json=alert)
+        message = build_html_email(alert_json=alert, summary_preview=subject_json["summary_preview"], whodata=no_whodata, detailed_analysis=detailed_analysis)
+
+    return subject_json["subject"], message
+
+
+
+def main(args):
+    """
+    Main function. This will call the functions to prepare the message and send the email 
+    """
+    debug("# Starting")
+
+    # Read args
+    alert_file_location = args[1]
+    recipients = args[3]
+ 
+    debug("# Webhook")
+    debug(recipients)
+
+    debug("# File location")
+    debug(alert_file_location)
+
+    # Load alert. Parse JSON object.
+    with open(alert_file_location) as alert_file:
+        json_alert = json.load(alert_file)
+    debug("# Processing alert")
+    debug(json_alert)
+
+    debug("# Generating message")
+    subject,  msg = generate_msg(json_alert)
+    debug(msg)
+
+    debug("# Sending message")
+    send_email(recipients, subject, msg)
+
+"""
+Function to send email using an unautheticated email server.
+"""
+def send_email(recipients, subject, body):    
+    TO = recipients.split(',')
+    em = EmailMessage()
+    em['To'] = TO
+    em['From'] = email_from 
+    em['Subject'] = subject
+    em.add_header('Content-Type','text/html')
+    em.set_content(body, subtype='html')
+    try:
+        # SMTP_SSL Example
+        mailserver = smtplib.SMTP(email_server, 25)
+        mailserver.ehlo() # optional, called by login()
+        mailserver.send_message(em)
+        mailserver.close()
+        debug('Successfully sent the mail to {}'.format(TO))
+    except Exception as e:
+        debug("Failed to send mail to {}".format(TO))
+        debug("With error: {}".format(e))
+
+"""
+Function to generate debug logs
+"""
+def debug(msg):
+    
+    if debug_enabled:
+        msg = "{0}: {1}\n".format(now, msg)
+        print(msg)
+        f = open(log_file, "a")
+        f.write(msg)
+        f.close()
+
+if __name__ == "__main__":
+    try:
+        # Read arguments
+        bad_arguments = False
+        if len(sys.argv) >= 4:
+            msg = '{0} {1} {2} {3} {4}'.format(
+                now,
+                sys.argv[1],
+                sys.argv[2],
+                sys.argv[3],
+                sys.argv[4] if len(sys.argv) > 4 else '',
+            )
+            debug_enabled = (len(sys.argv) > 4 and sys.argv[4] == 'debug')
+        else:
+            msg = '{0} Wrong arguments'.format(now)
+            debug(msg, sys.argv)
+            bad_arguments = True
+
+        # Logging the call
+        f = open(log_file, 'a')
+        f.write(msg + '\n')
+        f.close()
+
+        if bad_arguments:
+            debug("# Exiting: Bad arguments.")
+            sys.exit(1)
+
+        # Main function
+        main(sys.argv)
+
+    except Exception as e:
+        debug(str(e))
+        raise

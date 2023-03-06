@@ -1,0 +1,96 @@
+{
+    "timestamp": "2023-02-19T05:31:06.564+0000",
+    "rule": {
+        "level": 5,
+        "description": "File added to the system.",
+        "id": "554",
+        "firedtimes": 10,
+        "mail": false,
+        "groups": [
+            "ossec",
+            "syscheck",
+            "syscheck_entry_added",
+            "syscheck_file"
+        ],
+        "pci_dss": [
+            "11.5"
+        ],
+        "gpg13": [
+            "4.11"
+        ],
+        "gdpr": [
+            "II_5.1.f"
+        ],
+        "hipaa": [
+            "164.312.c.1",
+            "164.312.c.2"
+        ],
+        "nist_800_53": [
+            "SI.7"
+        ],
+        "tsc": [
+            "PI1.4",
+            "PI1.5",
+            "CC6.1",
+            "CC6.8",
+            "CC7.2",
+            "CC7.3"
+        ]
+    },
+    "agent": {
+        "id": "001",
+        "name": "ubu-fortest",
+        "ip": "192.168.120.151"
+    },
+    "manager": {
+        "name": "poc"
+    },
+    "id": "1676784666.37469",
+    "full_log": "File '/opt/2023_02_19-11_01_06.1676784666' added\nMode: whodata\n",
+    "syscheck": {
+        "path": "/opt/2023_02_19-11_01_06.1676784666",
+        "mode": "whodata",
+        "size_after": "42",
+        "perm_after": "rw-r--r--",
+        "uid_after": "0",
+        "gid_after": "0",
+        "md5_after": "9d4070180c0bace136caef8f60155ae0",
+        "sha1_after": "43ceccdbef417d2650dc16ddb37caceffca0b7c9",
+        "sha256_after": "655497a910ce6702f7102ef2ed707f4d52a539c6498d2feded5f78a2f43ac30a",
+        "uname_after": "root",
+        "gname_after": "root",
+        "mtime_after": "2023-02-19T05:31:06",
+        "inode_after": 1572883,
+        "event": "added",
+        "audit": {
+            "user": {
+                "id": "0",
+                "name": "root"
+            },
+            "process": {
+                "id": "3203",
+                "name": "/bin/bash",
+                "cwd": "/root",
+                "parent_name": "/usr/bin/sudo",
+                "parent_cwd": "/home/user1",
+                "ppid": "3202"
+            },
+            "group": {
+                "id": "0",
+                "name": "root"
+            },
+            "login_user": {
+                "id": "1000",
+                "name": "user1"
+            },
+            "effective_user": {
+                "id": "0",
+                "name": "root"
+            }
+        }
+    },
+    "decoder": {
+        "name": "syscheck_new_entry"
+    },
+    "location": "syscheck"
+}
